@@ -1,0 +1,689 @@
+---
+title: "Legal ID - Multicountry Comparison"
+author: "Shabrina Mardevi"
+date: "18/10/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(haven)       
+library(tidyverse)  
+library(naniar)  
+library(survey)
+library(srvyr)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(janitor)
+library(ggplot2)
+library(readxl)
+library(openxlsx)
+library(pointblank)
+library(ggrepel)
+```
+
+# 1. Prepare IPUMS Data
+
+```{r}
+# Load latest IPUMS Census Data for Ecuador, Pakistan, Peru, and Zambia
+multi_ipums <- read_dta("./Input/ipumsi_00009 2.dta")
+```
+
+```{r}
+# Subset population to samples with legal ID age and above
+ipums_legal_age  <- 
+  multi_ipums %>% 
+  filter((country == 218 & age > 16) | 
+           (country == 586 & age > 17) |
+           (country == 604 & age > 17) | 
+           (country == 894 & age > 15)) %>% 
+  
+  # Set variables as.factor()
+  mutate_at(.vars = c("country", "sex", "ethnicec", "geolev1", "age2",
+                      "edattain", "ec2010a_citcard", "ec2010a_race",
+                      "pk1998a_relig", "pk1998a_idcard", "pe2007a_idcard", 
+                      "pe2007a_religion", "zm2010a_relig", "ethniczm", 
+                      "zm2010a_nidcard"), ~as.factor(.))%>%
+  
+  # Recode countries
+  mutate(country = recode(country, "218" = "ecuador", 
+                          "586" = "pakistan", 
+                          "604" = "peru", 
+                          "894" = "zambia"),
+         edattain = recode(edattain, "0" = "NIU",
+                           "1" = "Less than primary",
+                           "2" = "Primary",
+                           "3" = "Secondary",
+                           "4" = "Post-secondary",
+                           "9" = "Unknown"),
+         ethniczm = recode(ethniczm, 
+                           "4" = "Bisa",
+                           "18" = "Luano",
+                           "34" = "Luyana",
+                           "42" = "Mashi",
+                           "61" = "Yombe",
+                           "68" = "Other",
+                           "99" = "Unspecified", 
+                           "67" = "European", 
+                           "66" = "Asian",
+                           "65" = "American", 
+                           "64" = "Other African"),
+          ethnicec = recode(ethnicec, 
+                           "1" = "Achuar",
+                           "2" = "Awa",
+                           "3" = "Cofan",
+                           "4" = "Chachi",
+                           "7" = "Siona",
+                           "9" = "Zapara",
+                           "18" = "Quitu",
+                           "31" = "Epera",
+                           "33" = "Andoa",
+                           "36" = "Pastos",
+                           "37" = "Tomabela",
+                           "34" = "Pastos"),
+         zm2010a_relig = recode(zm2010a_relig, "4" = "Hindu", "3" = "Muslim"),
+         pk1998a_relig = recode(pk1998a_relig, "3" = "Hindu", "5" = "Scheduled Caste"),
+         sex = recode(sex, "1" = "Male", "2" = "Female"),
+         age2 = recode(age2, "4"="15-19", 
+                       "12" = "20-24", 
+                       "13" = "25-29",
+                       "14" = "30-34",
+                       "15" = "35-39",
+                       "16" = "40-44",
+                       "17" = "45-49",
+                       "18" = "50-54",
+                       "19" = "55-59",
+                       "20" = "60-64",
+                       "21" = "65-69",
+                       "22" = "70-74",
+                       "23" = "75-79",
+                       "24" = "80+", 
+                       "25" = "85+" ),
+         geolev1 = recode(geolev1, "586005" = "Baluchistan",
+                          "218006" = "Chimborazo",
+                          "604007" = "Callao",
+                          "604018" = "Moquegua")
+         )
+  
+```
+
+
+```{r}
+
+# Create function to summarise Legal ID ownership by subpopulations
+subpop_summary <- function(data) {
+
+  # Set CI alpha (95% level) - (1-alpha/2)*100%
+  alpha = 0.05
+
+  # Calculate the critical z-score
+  z = qnorm(1-alpha/2)
+  
+  data_imp <-
+  data %>% 
+  gather(-c(country, id, ), key = "type", value = "subpop") %>% 
+  group_by(country, type, subpop, id) %>% 
+    
+  # Number of ID possession by Subgroups, weighted (Person Weight = 10)
+  summarise(n_id=(n()*10)) %>% 
+  mutate (prop_id = n_id/sum(n_id)) %>% 
+  mutate (total_subpop = sum(n_id)) %>% 
+  
+  # Standard Error
+  mutate (Std_Err = z*sqrt(prop_id*(1-prop_id)/total_subpop)) %>% 
+  
+  # Confidence Intervals
+  mutate (Lower_CI = prop_id + (-1)*Std_Err) %>% 
+  mutate (Upper_CI = prop_id + 1*Std_Err) %>% 
+  filter(id == "yes") %>% 
+  select(-id)
+  
+  # Range
+  Range <- max(data_imp$prop_id)-min(data_imp$prop_id)
+  data_imp <- cbind(data_imp, Range)
+  
+  data_imp <- rename(data_imp, "Range" = "...10")
+  
+  return(data_imp)
+}
+```
+
+
+
+```{r}
+# Ecuador Legal ID by Education, Ethnicity, Race, and Urban/Rural
+coord_ecuador <- runif(44, 0.5, 1.3)
+
+ecuador <- 
+  ipums_legal_age %>% 
+  subset(country == "ecuador", 
+         select = c(country, geolev1, sex, age2, edattain,
+                    ec2010a_citcard, ec2010a_race)) %>% 
+  mutate(ec2010a_citcard = recode(ec2010a_citcard, "1" = "yes", "2" = "no")) %>% 
+  rename_at (.vars = c("ec2010a_race", "ec2010a_citcard"), 
+             ~c("race", "id")) %>% 
+  subpop_summary() %>% 
+  cbind(., coord_ecuador) %>% 
+  rename(coord = "...11") %>% 
+  mutate(subpop = recode(subpop, "3" = "Black"))
+
+ecuador%>% 
+  kable(format = "pipe", caption = "Legal ID Possession by Subpopulations")
+```
+
+```{r}
+# Pakistan Legal ID by Education, Religion, and Urban/Rural
+
+pakistan <- 
+  ipums_legal_age %>% 
+  subset(country == "pakistan",
+         select = c(country, geolev1, sex, age2, edattain, pk1998a_relig, pk1998a_idcard)) %>% 
+  mutate(pk1998a_idcard = recode(pk1998a_idcard, "1" = "yes", "2" = "no", 
+                                 "8" = "unknown", "9" = "niu")) %>% # There are NIU IDs in Pakistan despite the legal age subset
+  rename_at (.vars = c("pk1998a_idcard", "pk1998a_relig"), 
+             ~c("id", "religion") )  %>% 
+  subpop_summary()%>% 
+  cbind(., runif(32, 4.7, 5.3)) %>% 
+  rename(coord = "...11")
+
+pakistan %>% 
+  kable(format = "pipe", caption = "Legal ID Possession by Subpopulations")
+```
+
+```{r}
+# Peru Legal ID by Education, Religion, and Urban/Rural
+peru <- 
+  ipums_legal_age %>%  
+  subset(country == "peru",
+         select = c(country, geolev1, sex, age2, edattain, pe2007a_idcard, pe2007a_religion)) %>% 
+  mutate(pe2007a_idcard = recode(pe2007a_idcard, "1" = "yes", "2" = "no", "9" = "niu")) %>% 
+  rename_at (.vars = c("pe2007a_idcard", "pe2007a_religion"), 
+             ~c("id", "religion") ) %>% 
+  subpop_summary() %>% 
+  cbind(., runif(50, 1.7, 2.3)) %>% 
+  rename(coord = "...11")
+
+peru %>% 
+  kable(format = "pipe", caption = "Legal ID Possession by Subpopulations")
+```
+
+
+```{r}
+# Zambia Legal ID by Education, Ethnicity, and Religion
+zambia <- 
+  ipums_legal_age %>% 
+  subset(country == "zambia",
+         select = c(country, geolev1, sex, age2, edattain, zm2010a_relig, ethniczm, zm2010a_nidcard)) %>% 
+  mutate(zm2010a_nidcard = recode(zm2010a_nidcard, "1" = "yes", "2" = "no",
+                                  "8" = "unknown", "9" = "niu")) %>% 
+  rename_at (.vars = c("zm2010a_relig", "ethniczm", "zm2010a_nidcard"),
+             ~c("religion", "ethnic", "id") ) %>% 
+  subpop_summary() %>% 
+  cbind(., runif(103, 2.7, 3.25)) %>% 
+  rename(coord = "...11")
+
+zambia %>% 
+  kable(format = "pipe", caption = "Legal ID Possession by Subpopulations")
+```
+
+
+#2. Prepare  (India) Data
+
+## Set Up
+
+```{r LoadPackages, include=TRUE}
+library(dplyr)
+library(ggplot2)
+library(here)
+library(magrittr)
+```
+
+```{r LoadData, include=TRUE}
+pulse_mem <- read.csv("./Input/20191127_State of Aadhaar_Pulse survey_mem.csv")
+```
+
+
+
+## Country Level ID Ownership Averages
+
+```{r education recode}
+pulse_mem <- 
+  pulse_mem %>% 
+  mutate(education = recode(education, "1st Std. Pass" = "At least some primary", 
+                            "1st Std. Pass" = "At least some primary",
+                            "2nd Std. Pass" = "At least some primary",
+                            "3rd Std. Pass" = "At least some primary",
+                            "4th Std. Pass" = "At least some primary",
+                            "5th Std. Pass" = "At least some primary",
+                            "6th Std. Pass" = "At least some primary",
+                            "7th Std. Pass" = "At least some primary",
+                            "8th Std. Pass" = "At least some primary",
+                            "9th Std. Pass" = "At least some secondary",
+                            "11th Std. Pass" = "At least some secondary",
+                            "12th Std. Pass" = "At least some secondary",
+                            "10th Std. Pass" = "At least some secondary",
+                            "Graduate" = "Post-secondary",
+                            "Ph.D / M.Phil" = "Post-secondary", 
+                                     "Post Graduate" = "Post-secondary"))
+
+```
+
+```{r country tabulations, include = TRUE}
+tab_overall <- 
+pulse_mem %>% 
+  group_by(has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population)
+
+aadhaar_enrollment_overall <- tab_overall %>% filter(has_aadhaar == "Yes") %>%
+                select(weighted_proportion) %>%
+                pull()
+
+tab_gender <- 
+pulse_mem %>% 
+  group_by(gender, has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population) %>%
+  as.data.frame()
+
+aadhaar_enrollment_males <- tab_gender %>% 
+                filter(has_aadhaar == "Yes" & gender == "M") %>%
+                select(weighted_proportion) %>%
+                pull()
+aadhaar_enrollment_females <- tab_gender %>% 
+                filter(has_aadhaar == "Yes" & gender == "F") %>%
+                select(weighted_proportion) %>%
+                pull()
+
+
+```
+
+## Population Subgroup Level ID Ownership Tabulations
+
+```{r}
+
+#By Religion
+tab_religion <-
+
+pulse_mem %>% 
+  group_by(religion, has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population) %>%
+  filter(has_aadhaar == "Yes") %>% 
+  rename("subpop" = "religion") %>% 
+  mutate("type" = "religion", "country" = "India") %>% 
+  as.data.frame()
+
+```
+
+
+```{r}
+
+#By State (ADM 1)
+tab_state <-
+
+pulse_mem %>% 
+  group_by(state, has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population) %>%
+  filter(has_aadhaar == "Yes") %>% 
+  rename("subpop" = "state") %>% 
+  mutate("type" = "state", "country" = "India") %>% 
+  as.data.frame()
+
+```
+
+
+```{r}
+
+#By Gender
+tab_gender <-
+
+pulse_mem %>% 
+  group_by(gender, has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population) %>%
+  filter(has_aadhaar == "Yes") %>% 
+  rename("subpop" = "gender") %>% 
+  mutate("type" = "gender", "country" = "India") %>% 
+  as.data.frame()
+
+```
+
+```{r}
+
+#By Education
+tab_education <-
+
+pulse_mem %>% 
+  group_by(education, has_aadhaar) %>%
+  summarise(weighted_n =
+  sum(mem_weight_extn_all_hr_regtype_strata_within_state_sample_wave)) %>%
+  mutate(population = sum(weighted_n),
+         weighted_proportion = weighted_n / population) %>%
+  filter(has_aadhaar == "Yes") %>% 
+  rename("subpop" = "education") %>% 
+  mutate("type" = "edattain", "country" = "India") %>% 
+  as.data.frame()
+
+```
+
+
+```{r}
+
+# Bind all tabs by row
+india <- rbind(tab_state, tab_gender, tab_religion, tab_education)
+
+# Clean data for Merging
+india <- 
+  india %>% 
+  select(-has_aadhaar) %>% 
+  rename_at(vars(weighted_n, population, weighted_proportion), ~c("n_id", "total_subpop", "prop_id")) %>% 
+  mutate("Std_Err" = NA, "Lower_CI" = NA, "Upper_CI" = NA) %>% 
+  select(country, type, subpop, n_id, prop_id, total_subpop, everything())
+
+range_india <-max(india$prop_id)-min(india$prop_id)
+
+india <-
+  india %>% 
+  cbind(., range_india) %>% 
+  rename("Range" = range_india) %>% 
+  cbind(., runif(44, 5.7, 6.3)) %>% 
+  rename(coord = "runif(44, 5.7, 6.3)")
+```
+
+# 3. Prepare Myanmar Data
+
+```{r read G1_G2_Myanmar}
+
+G1_Myanmar <-
+  read_excel(here::here("./Input/G1_Myanmar.xlsx"))
+
+G2_Myanmar <-
+  read_excel(here::here("./Input/G2_Myanmar.xlsx"))
+
+```
+
+```{r read Union Myanmar}
+
+# For Sex Dis. Data
+union <- read_excel("./Input/union_myanmar_modif.xlsx")
+union <- 
+  union %>% 
+  clean_names() %>% 
+  select(-age)
+union <- aggregate(. ~sex, data=union, sum)
+
+```
+
+```{r aggregate G1}
+
+agg_G1 <-
+  G1_Myanmar %>% 
+  select(-c(state_area_name)) %>%
+  filter(age_group!="Total") %>% 
+  mutate(age_group = gsub(" ", "", age_group))
+agg_G1 <- aggregate(. ~age_group, data = agg_G1, sum)
+
+```
+
+```{r tab myanmar age}
+
+myanmar_age <-
+  agg_G1 %>% 
+  select(c(age_group:citizenship_scrutiny_card, national_registration_card)) %>% 
+  mutate("n_id" = citizenship_scrutiny_card + national_registration_card,
+         "prop_id" = n_id/total,
+         "country" = "myanmar",
+         "type" = "age2",
+         "Std_Err" = NA,
+         "Lower_CI" = NA,
+         "Upper_CI" = NA) %>% 
+  rename_at(vars(age_group, total), ~c("subpop", "total_subpop")) %>% 
+  select(c(country, type, subpop, n_id, prop_id, total_subpop, Std_Err, Lower_CI, Upper_CI))
+
+```
+
+```{r aggregate Myanmar G2}
+agg_state <-
+  G2_Myanmar %>% 
+  select(2,7:17)
+agg_state <- aggregate(. ~state_region_name+urban_rural, data=agg_state, sum)
+```
+
+```{r tab myanmar state}
+myanmar_state <-
+  agg_state %>% 
+  select(c(state_region_name:citizenship_scrutiny_card, national_registration_card)) %>% 
+  filter(urban_rural == "Total") %>% 
+  mutate("n_id" = citizenship_scrutiny_card + national_registration_card,
+         "prop_id" = n_id/total,
+         "country" = "myanmar",
+         "type" = "geolev1",
+         "Std_Err" = NA,
+         "Lower_CI" = NA,
+         "Upper_CI" = NA) %>% 
+  rename_at(vars(state_region_name, total), ~c("subpop", "total_subpop")) %>% 
+  select(c(country, type, subpop, n_id, prop_id, total_subpop, Std_Err, Lower_CI, Upper_CI))
+```
+
+```{r tab myanmar sex}
+myanmar_sex <-
+  union %>% 
+  clean_names() %>% 
+  select(c(sex, total:citizenship_scrutiny_card, national_registration_card)) %>% 
+  mutate("n_id" = citizenship_scrutiny_card + national_registration_card,
+         "prop_id" = n_id/total,
+         "country" = "myanmar",
+         "type" = "sex",
+         "Std_Err" = NA,
+         "Lower_CI" = NA,
+         "Upper_CI" = NA) %>% 
+  rename_at(vars(sex, total), ~c("subpop", "total_subpop")) %>% 
+  select(c(country, type, subpop, n_id, prop_id, total_subpop, Std_Err, Lower_CI, Upper_CI))
+
+```
+
+```{r myanmar national average}
+avg_myanmar <-
+  agg_state %>% 
+  filter(urban_rural=="Total") %>% 
+  select(c(urban_rural, total, citizenship_scrutiny_card, national_registration_card)) %>% 
+  mutate(id = citizenship_scrutiny_card + national_registration_card)
+
+avg_m <- sum(avg_myanmar$id)/sum(avg_myanmar$total)
+```
+
+```{r bind myanmar}
+
+myanmar<-bind_rows(myanmar_state, myanmar_sex, myanmar_age)
+
+range_myanmar <-max(myanmar$prop_id)-min(myanmar$prop_id)
+
+myanmar <-
+  myanmar %>% 
+  cbind(., range_myanmar) %>% 
+  rename("Range" = range_myanmar) %>% 
+  cbind(., runif(34, 3.8, 4.3)) %>% 
+  rename(coord = "runif(34, 3.8, 4.3)")
+
+```
+
+# Bind all Countries
+
+```{r}
+multi_emppzi <- 
+  bind_rows(ecuador, myanmar, pakistan, peru, zambia, india) 
+
+multi_emppzi <- 
+  multi_emppzi %>% 
+  mutate(type = recode(type, "ethnic" = "ethnicity/race", "race" = "ethnicity/race", "state" = "geolev1", "gender" = "sex")) %>% 
+  mutate(country = reorder(country, Range))
+
+```
+
+```{r fig.height = 7, fig.width = 12}
+ggplot(multi_emppzi, aes(x = prop_id,
+                  y = coord,
+                    #factor(country, 
+                             #levels = c("peru","ecuador", "zambia", 
+                                        #"myanmar", "pakistan", "India")),
+                  color = country, 
+                  shape = type, 
+                  size = total_subpop)) +
+  geom_jitter() +
+  theme_minimal() +
+  scale_y_continuous(breaks = c(1, 2, 3, 4, 5, 6)) +
+  geom_vline(xintercept = 0, color = "#999999") +
+  #Overall country proportions of ID ownership
+  geom_vline(xintercept = 0.98, color = "#D55E00", linetype = "dashed") +
+  geom_vline(xintercept = 0.97, color = "#0072B2", linetype = "dashed") +
+  geom_vline(xintercept = aadhaar_enrollment_overall, color = "#999900", linetype = "dashed") +
+  geom_vline(xintercept = 0.64, color = "#33CCCC", linetype = "dashed") +
+  geom_vline(xintercept = 0.78, color = "purple", linetype = "dashed")+
+  geom_vline(xintercept = avg_m, color = "#009E73", linetype = "dashed") +
+  geom_text_repel(data=subset(multi_emppzi, ((country == "ecuador" & prop_id<0.94)|
+                                (country == "ecuador" & prop_id>0.992)|
+                                (country == "peru" & prop_id<0.90)|
+                                (country == "peru" & prop_id>0.987)|
+                              (country == "zambia" & prop_id<0.68 & !(subpop %in% c("Asian", "American", "European")))|
+                              (country == "zambia" & prop_id>0.872)|
+                              (country == "myanmar" & prop_id<0.64)|
+                              (country == "myanmar" & prop_id>0.88)|
+                              (country == "pakistan" & prop_id>0.89)|
+                              (country == "pakistan" & prop_id<0.530)|
+                              (country == "India" & prop_id<0.75)|
+                              (country == "India" & prop_id>0.995)|
+                                (country == "pakistan" & subpop == "Male"))),
+                  aes(prop_id, coord, label=subpop), 
+                  size = 2.75, vnudge = 1.5, hnudge = 0.275, color = "Black", fontface = "bold") +
+  scale_size_continuous(name = "Population Subgroup Total", 
+                        breaks = c(1000, 100000, 10000000, 1000000000),
+                        labels = c("1,000", "100,000", "10,000,000", 
+                                  "1,000,000,000")) +
+  labs(title = "Percentage of Population with Proof of Legal Identity by Population Subgroup, Various Countries (1998-2019)\n", 
+       x = "% Population Subgroup with Proof of Legal Identity", y = element_blank()) +
+  scale_shape_discrete(name = "Population Subgroup Type", 
+                       labels = c("Age Group", "Education Attainment", "Ethnicity/Race", 
+                                  "Adm. 1 Region", "Religion", "Sex")) +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank()) +
+  annotate("text", x = -0.15:0, y = 1, label = "Ecuador\n(Census, 2010)", fontface = "bold", color = "#D55E00") +
+  annotate("text", x = -0.15:0, y = 2, label = "Peru\n(Census, 2007)", fontface = "bold", color = "#0072B2") +
+  annotate("text", x = -0.15:0, y = 3, label = "Zambia\n(Census, 2010)", fontface = "bold", color = "purple") +
+  annotate("text", x = -0.15:0, y = 4, label = "Myanmar\n(Census, 2014)", fontface = "bold", color = "#009E73") +
+  annotate("text", x = -0.15:0, y = 5, label = "Pakistan\n(Census, 1998)", fontface = "bold", color = "#33CCCC") +
+  annotate("text", x = -0.15:0, y = 6, label = "India\n(Household Survey, 2019)", fontface = "bold", color = "#999900") +
+  scale_x_continuous(labels = function(prop_id) paste0(prop_id*100, "%"), limits = c(-0.25, 1), breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  guides(color=FALSE)
+```
+
+
+# Multi-methods/data sources Comparison Analysis
+
+
+```{r}
+comp<-read_excel("./Input/comp.xlsx")
+comp_base<-
+  comp %>% 
+  gather(-Country, key = "data", value = "prop") %>% 
+  mutate(x = ifelse(Country == "Zambia", 1,
+                    ifelse (Country == "Pakistan", 3,
+                            ifelse(Country == "Myanmar", 2,
+                                   ifelse(Country == "India", 4,
+                                          ifelse(Country == "Peru", 5,
+                                                 ifelse(Country == "Ecuador", 6, NA)))))),
+         x1 = x-0.25,
+         x2 = x+0.25,
+         prop1 = prop-0.008,
+         prop2 = prop+0.008) %>% 
+  filter(!(data %in% c("INDEX_recalc", "birth_reg", "voters_reg")))
+```
+
+```{r fig.height = 7, fig.width = 12}
+ggplot(comp_base, aes(xmin = x1, xmax = x2, ymin = prop1, ymax = prop2, fill = data), color = "black", alpha = 0.75) +
+  geom_rect() +
+  scale_y_continuous(labels = function(prop) paste0(prop*100, "%"), limits = c(-0.1, 1.075), breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+   labs(title = "Percentage of Population with Proof of Official Legal Identity\nby Data Source and/or Estimation Method",
+        x = element_blank(),
+        y = "% Population with Proof of Official Legal Identity") +
+  scale_fill_manual(name = element_blank(),
+                    breaks=c("Census", "Household Survey", "INDEX", "FINDEX"),
+                    labels = c("Census Data", "Household Survey", 
+                               "ID4D-INDEX (UNICEF Birth Registration Database\nNational ID Entity & Voters' Registration Data)", 
+                               "ID4D-FINDEX (Gallup Opinion Poll)",
+                    values = c("#E69F00", "#D55E00", "#009E73","#56B4E9"))) +
+  annotate("text", x = 1, y = -0.05, label = "Zambia", fontface = "bold", size=5) +
+  annotate("text", x = 2, y = -0.05, label = "Myanmar", fontface = "bold", size=5) +
+  annotate("text", x = 3, y = -0.05, label = "Pakistan", fontface = "bold", size=5) +
+  annotate("text", x = 4, y = -0.05, label = "India", fontface = "bold", size=5) +
+  annotate("text", x = 5, y = -0.05, label = "Peru", fontface = "bold", size=5) +
+  annotate("text", x = 6, y = -0.05, label = "Ecuador", fontface = "bold", size=5) +
+  geom_hline(yintercept = 0, color = "#999999") +
+  theme_minimal() +
+  guides(size=FALSE) +
+  theme(legend.position="bottom")+
+  theme(axis.text.x = element_blank()) 
+```
+
+### With additional estimates
+```{r}
+comp_extra<-
+  comp %>% 
+  gather(-Country, key = "data", value = "prop") %>% 
+  mutate(x = ifelse(Country == "Zambia", 1,
+                    ifelse (Country == "Pakistan", 3,
+                            ifelse(Country == "Myanmar", 2,
+                                   ifelse(Country == "India", 4,
+                                          ifelse(Country == "Peru", 5,
+                                                 ifelse(Country == "Ecuador", 6, NA)))))),
+         x1 = x-0.25,
+         x2 = x+0.25,
+         prop1 = prop-0.008,
+         prop2 = prop+0.008) 
+```
+
+```{r fig.height = 7, fig.width = 12}
+ggplot(comp_extra, aes(xmin = x1, xmax = x2, ymin = prop1, ymax = prop2, fill = data), color = "black", alpha = 0.75) +
+  geom_rect() +
+  scale_y_continuous(labels = function(prop) paste0(prop*100, "%"), limits = c(-0.1, 1.075), breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+   labs(title = "Percentage of Population with Proof of Official Legal Identity\nby Data Source and/or Estimation Method",
+        x = element_blank(),
+        y = "% Population with Proof of Official Legal Identity") +
+  scale_fill_manual(name = element_blank(),
+                    breaks=c("Census", "Household Survey", "INDEX", "FINDEX", "INDEX_recalc", "birth_reg", "voters_reg"),
+                    labels = c("Census Data", "Household Survey", 
+                               "ID4D-INDEX (UNICEF Birth Registration Database\nNational ID Entity & Voters' Registration Data)", 
+                               "ID4D-FINDEX (Gallup Opinion Poll)",
+                               "Census & ID4D-INDEX Estimate Approach",
+                               "Census-Birth Registration",
+                               "Census-Voters' Registration"),
+                    values = c("#E69F00", "#D55E00", "#009E73","#56B4E9", "#999999", "#CC79A7", "#0072B2")) +
+  annotate("text", x = 1, y = -0.05, label = "Zambia", fontface = "bold", size=5) +
+  annotate("text", x = 2, y = -0.05, label = "Myanmar", fontface = "bold", size=5) +
+  annotate("text", x = 3, y = -0.05, label = "Pakistan", fontface = "bold", size=5) +
+  annotate("text", x = 4, y = -0.05, label = "India", fontface = "bold", size=5) +
+  annotate("text", x = 5, y = -0.05, label = "Peru", fontface = "bold", size=5) +
+  annotate("text", x = 6, y = -0.05, label = "Ecuador", fontface = "bold", size=5) +
+  geom_hline(yintercept = 0, color = "#999999") +
+  theme_minimal() +
+  guides(size=FALSE) +
+  theme(legend.position="bottom")+
+  theme(axis.text.x = element_blank()) 
+```
+
+
